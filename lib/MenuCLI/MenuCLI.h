@@ -27,9 +27,14 @@ public:
 
     void attachOutput(Stream* out);
 
+    using OnExitCallback = std::function<void()>;
+    void setOnExit(OnExitCallback cb) { _onExit = cb; }
+
 private:
-    String _lineBuffer;
-    bool _echoEnabled = false;
+    static constexpr size_t LINE_BUFFER_SIZE = 128;
+    char _lineBuffer[LINE_BUFFER_SIZE] = {0};
+    size_t _lineLen = 0;
+    bool _echoEnabled = true;
 
     struct CommandInfo {
         String help;
@@ -63,4 +68,6 @@ private:
 
     void bufferOutput(const String& s);
     void bufferOutputChar(char c);
+
+    OnExitCallback _onExit = nullptr;
 };

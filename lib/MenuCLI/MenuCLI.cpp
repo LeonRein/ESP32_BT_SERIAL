@@ -14,7 +14,10 @@ void MenuCLI::attachOutput(Stream* out) {
 
 void MenuCLI::begin()
 {
-    _lineBuffer = "";
+    _lineLen = 0;
+    _lineBuffer[0] = '\0';
+
+    printHelp();
     printPrompt();
 }
 
@@ -25,63 +28,93 @@ void MenuCLI::registerCommand(const String &cmd, const String &help, CommandHand
 
 void MenuCLI::handleInputChar(char c)
 {
-    if (_echoEnabled)
-    {
-        bufferOutputChar(c);
-    }
     if (c == '\r')
         return; // Ignore CR
     if (c == '\n')
     {
         bufferOutput("\n");
         processLine();
-        _lineBuffer = "";
-        printPrompt();
+        _lineLen = 0;
+        _lineBuffer[0] = '\0';
         return;
     }
     if (c == 8 || c == 127)
     { // Backspace or DEL
-        if (_lineBuffer.length() > 0)
+        if (_lineLen > 0)
         {
-            _lineBuffer.remove(_lineBuffer.length() - 1);
+            _lineLen--;
+            _lineBuffer[_lineLen] = '\0';
             bufferOutput("\b \b");
         }
         return;
     }
     if (isPrintable(c))
     {
-        _lineBuffer += c;
-        bufferOutputChar(c);
+        if (_lineLen < LINE_BUFFER_SIZE - 1)
+        {
+            _lineBuffer[_lineLen++] = c;
+            _lineBuffer[_lineLen] = '\0';
+            if (_echoEnabled)
+                bufferOutputChar(c);
+        }
     }
 }
 
 void MenuCLI::processLine()
 {
-    String line = _lineBuffer;
-    line.trim();
-    if (line.length() == 0)
-        return;
-
-    int spaceIdx = line.indexOf(' ');
-    String cmd = (spaceIdx == -1) ? line : line.substring(0, spaceIdx);
-    String args = (spaceIdx == -1) ? "" : line.substring(spaceIdx + 1);
-
-    cmd.toLowerCase();
-
-    if (cmd == "help")
-    {
-        printHelp();
+    // Trim leading whitespace
+    size_t start = 0;
+    while (start < _lineLen && isspace(_lineBuffer[start])) start++;
+    // Trim trailing whitespace
+    size_t end = _lineLen;
+    while (end > start && isspace(_lineBuffer[end - 1])) end--;
+    if (end <= start) {
+        printPrompt(); // Print prompt for empty input
         return;
     }
-    auto it = _commands.find(cmd);
-    if (it != _commands.end())
-    {
-        it->second.handler(args, outputStream()); // Pass proxy stream
+
+    _lineBuffer[end] = '\0'; // Null-terminate after last non-space
+
+    const char* cmdline = _lineBuffer + start;
+
+    String matchedCmd;
+    String matchedArgs;
+    auto matchedIt = _commands.end();
+
+    for (auto it = _commands.begin(); it != _commands.end(); ++it) {
+        const String &cmd = it->first;
+        size_t cmdLen = cmd.length();
+        if (strncmp(cmdline, cmd.c_str(), cmdLen) == 0) {
+            if (cmdline[cmdLen] == '\0' || isspace(cmdline[cmdLen])) {
+                if (cmdLen > matchedCmd.length()) {
+                    matchedCmd = cmd;
+                    matchedArgs = String(cmdline + cmdLen);
+                    matchedArgs.trim();
+                    matchedIt = it;
+                }
+            }
+        }
     }
-    else
-    {
+
+    if (matchedCmd.length() == 0) {
+        if (strncmp(cmdline, "help", 4) == 0 && (cmdline[4] == '\0' || isspace(cmdline[4]))) {
+            printHelp();
+            printPrompt(); // Print prompt after help
+            return;
+        }
+        if (strncmp(cmdline, "exit", 4) == 0 && (cmdline[4] == '\0' || isspace(cmdline[4]))) {
+            bufferOutput("\nExiting menu, returning to idle mode.\n");
+            if (_onExit) _onExit();
+            // Do NOT print prompt after exit
+            return;
+        }
         bufferOutput("Unknown command. Type 'help' for a list.\n");
+        printPrompt(); // Print prompt after unknown command
+        return;
     }
+
+    matchedIt->second.handler(matchedArgs, outputStream());
+    printPrompt(); // Only print prompt after normal command
 }
 
 void MenuCLI::printPrompt()
@@ -97,7 +130,6 @@ void MenuCLI::printHelp()
         bufferOutput("  " + kv.first + ": " + kv.second.help + "\n");
     }
     bufferOutput("  help: Show this help\n");
-    bufferOutput("  exit: Exit menu\n");
 }
 
 // Stream interface

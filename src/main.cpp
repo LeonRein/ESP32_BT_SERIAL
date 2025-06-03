@@ -8,13 +8,21 @@
 #include <BluetoothSerial.h>
 #include "BLEBatteryTask.h"
 #include "MenuCLI.h"
+#include "ConfigManager.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+// Check if Bluetooth is available
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+
+// Check Serial Port Profile
+#if !defined(CONFIG_BT_SPP_ENABLED)
+#error Serial Port Profile for Bluetooth is not available or not enabled. It is only available for the ESP32 chip.
+#endif
+
 #define BUFFER_SIZE 256
-#define SERIAL1_RX 7
-#define SERIAL1_TX 8
-#define SERIAL1_BAUD 115200
 #define LED_PIN 13
 
 enum class SerialState
@@ -29,19 +37,19 @@ SerialState serialState = SerialState::Idle;
 unsigned long lastActivity = 0;
 const unsigned long ownerTimeout = 2000; // 2 seconds
 
-SemaphoreHandle_t stateMutex; // <-- Add this line
+SemaphoreHandle_t stateMutex;
 
-String device_name = "ESP32-BT-Slave";
+struct Config
+{
+  char bt_name[32] = "LC29HEA-BT";
+  uint32_t serial_baud = 460800;
+  uint32_t serial1_baud = 460800;
+  uint32_t serial1_rx = 7;
+  uint32_t serial1_tx = 8;
+};
 
-// Check if Bluetooth is available
-#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
-#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
-#endif
-
-// Check Serial Port Profile
-#if !defined(CONFIG_BT_SPP_ENABLED)
-#error Serial Port Profile for Bluetooth is not available or not enabled. It is only available for the ESP32 chip.
-#endif
+Config config;
+ConfigManager<Config> configManager(0);
 
 BluetoothSerial SerialBT;
 
@@ -52,7 +60,6 @@ void setState(SerialState state)
 {
   if (stateMutex)
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-  Serial.println("Setting state to: " + String((int)state));
   serialState = state;
   if (stateMutex)
     xSemaphoreGive(stateMutex);
@@ -79,7 +86,6 @@ void onSerial1Data(const uint8_t *buffer, size_t len)
   Serial.write(buffer, len);
   SerialBT.write(buffer, len);
 }
-
 
 void onSerialData(const uint8_t *buffer, size_t len)
 {
@@ -222,39 +228,99 @@ void onSerialBTData(const uint8_t *buffer, size_t len)
 
 void registerMenuCommands(MenuCLI *cli)
 {
-  cli->registerCommand("get baud", "Show Serial1 baudrate", [](const String &args, Stream& out)
-                       { out.println("DBG get baud"); });
-  cli->registerCommand("set baud", "Set Serial1 baudrate. Usage: set baud <baudrate>", [](const String &args, Stream& out)
-                       { out.println("DBG set baud"); });
-  cli->registerCommand("get bt_name", "Show Bluetooth device name", [](const String &args, Stream& out)
-                       { out.println("DBG get bt_name"); });
-  cli->registerCommand("set bt_name", "Set Bluetooth device name. Usage: set bt_name <name>", [](const String &args, Stream& out)
-                       { out.println("DBG set bt_name"); });
-  cli->registerCommand("echo on", "Enable echo mode", [](const String &args, Stream& out)
-                       { out.println("DBG echo on"); });
-  cli->registerCommand("echo off", "Disable echo mode", [](const String &args, Stream& out)
-                       { out.println("DBG echo off"); });
-  cli->registerCommand("exit", "Exit menu and return to idle mode", [](const String &args, Stream& out)
+  cli->registerCommand("get baud serial1", "Show Serial1 baudrate", [](const String &args, Stream &out)
                        {
-                         out.println("\nExiting menu, returning to idle mode.");
-                         setState(SerialState::Idle);
-                       });
+        out.print("Serial1 baudrate: ");
+        out.println(config.serial1_baud); });
+
+  cli->registerCommand("set baud serial1", "Set Serial1 baudrate. Usage: set baud serial1 <baudrate>", [](const String &args, Stream &out)
+                       {
+        long baud = args.toInt();
+        if (baud <= 0) {
+            out.println("Invalid baudrate. Usage: set baud serial1 <baudrate>");
+            return;
+        }
+        config.serial1_baud = baud;
+        Serial1.updateBaudRate(baud);
+        out.print("Serial1 baudrate set to: ");
+        out.println(baud);
+        configManager.save(); });
+
+  cli->registerCommand("get baud serial", "Show Serial baudrate", [](const String &args, Stream &out)
+                       {
+        out.print("Serial baudrate: ");
+        out.println(Serial.baudRate()); });
+
+  cli->registerCommand("set baud serial", "Set Serial baudrate. Usage: set baud serial <baudrate>", [](const String &args, Stream &out)
+                       {
+        long baud = args.toInt();
+        if (baud <= 0) {
+            out.println("Invalid baudrate. Usage: set baud serial <baudrate>");
+            return;
+        }
+        config.serial_baud = baud;
+        Serial.updateBaudRate(baud);
+        out.print("Serial baudrate set to: ");
+        out.println(baud);
+        configManager.save(); });
+
+  cli->registerCommand("get bt_name", "Show Bluetooth device name", [](const String &args, Stream &out)
+                       {
+        out.print("Bluetooth device name: ");
+        out.println(config.bt_name); });
+
+  cli->registerCommand("set bt_name", "Set Bluetooth device name. Usage: set bt_name <name>", [](const String &args, Stream &out)
+                       {
+        String name = args;
+        name.trim();
+        if (name.length() == 0 || name.length() >= sizeof(config.bt_name)) {
+            out.println("Invalid name. Usage: set bt_name <name>");
+            return;
+        }
+        name.toCharArray(config.bt_name, sizeof(config.bt_name));
+        out.print("Bluetooth device name set to: ");
+        out.println(config.bt_name);
+        configManager.save();
+        out.println("Restarting ESP32 to apply new name...");
+        delay(100); // Allow message to be sent
+        ESP.restart(); });
+
+  cli->registerCommand("echo on", "Enable echo mode", [](const String &args, Stream &out)
+                       {
+        menuCLI.setEcho(true);
+        out.println("Echo mode enabled."); });
+
+  cli->registerCommand("echo off", "Disable echo mode", [](const String &args, Stream &out)
+                       {
+        menuCLI.setEcho(false);
+        out.println("Echo mode disabled."); });
 }
+
 void setup()
 {
-    Serial.begin(115200);
+  bool loaded = configManager.begin(&config);
+  if (loaded)
+  {
+    Serial.begin(config.serial_baud);
     Serial.setTimeout(10);
-    Serial1.begin(SERIAL1_BAUD, SERIAL_8N1, SERIAL1_RX, SERIAL1_TX);
+    Serial1.begin(config.serial1_baud, SERIAL_8N1, config.serial1_rx, config.serial1_tx);
     Serial1.setTimeout(10);
+
+    if (!loaded)
+    {
+      Serial.println("Config CRC mismatch or uninitialized, using defaults.");
+    }
 
     menuCLI.attachOutput(&Serial);
     menuCLI.attachOutput(&SerialBT);
+    menuCLI.setOnExit([]()
+                      { setState(SerialState::Idle); });
 
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
 
     // Start BLE battery task
-    startBLEBatteryTask(device_name.c_str());
+    startBLEBatteryTask(config.bt_name);
 
     registerMenuCommands(&menuCLI);
 
@@ -262,7 +328,7 @@ void setup()
 
     // Inline lambdas for buffer handling
     Serial.onReceive([]()
-                   {
+                     {
         static uint8_t buffer[BUFFER_SIZE] = {0};
         while (Serial.available()) {
             digitalWrite(LED_PIN, HIGH); // Turn LED on
@@ -273,8 +339,8 @@ void setup()
             digitalWrite(LED_PIN, LOW); // Turn LED off after processing
         } }, false);
 
-  Serial1.onReceive([]()
-                    {
+    Serial1.onReceive([]()
+                      {
         static uint8_t buffer[BUFFER_SIZE] = {0};
         while (Serial1.available()) {
             digitalWrite(LED_PIN, HIGH); // Turn LED on
@@ -285,10 +351,11 @@ void setup()
             digitalWrite(LED_PIN, LOW); // Turn LED off after processing
         } }, false);
 
-  SerialBT.onData(onSerialBTData);
+    SerialBT.onData(onSerialBTData);
 
-  SerialBT.begin(device_name);
-  Serial.printf("The device with name \"%s\" is started.\nNow you can pair it with Bluetooth!\n", device_name.c_str());
+    SerialBT.begin(config.bt_name);
+    Serial.printf("The device with name \"%s\" is started.\nNow you can pair it with Bluetooth!\n", config.bt_name);
+  }
 }
 
 void loop()
